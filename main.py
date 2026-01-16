@@ -87,7 +87,7 @@ def smooth_video(input_path, filename):
 if __name__ == "__main__":
     # USER INPUTS
     PROMPT = "A cyberpunk detective smoking a cigarette, neon rain, highly detailed"
-    ATTACHMENT = "my_reference_photo.png" # Ensure this file exists in your folder!
+    ATTACHMENT = "my_reference_photo.jpg" # Ensure this file exists in your folder!
     PROJECT_NAME = "cyberpunk_scene_01"
 
     if not os.path.exists(ATTACHMENT):
