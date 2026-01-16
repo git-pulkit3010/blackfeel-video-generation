@@ -28,11 +28,31 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def generate_segment(prompt, image_path, filename):
     print(f"\n--- Generating: {filename} ---")
-    pipe = WanImageToVideoPipeline.from_pretrained(MODEL_ID, torch_dtype=torch.float16).to("cuda")
+    
+    # Load in FP16
+    pipe = WanImageToVideoPipeline.from_pretrained(
+        MODEL_ID, 
+        torch_dtype=torch.float16
+    )
+
+    # CRITICAL FIX: Use Sequential CPU Offload for 80GB VRAM
+    # This is more memory-efficient than pipe.to("cuda")
+    pipe.enable_sequential_cpu_offload()
+    
     ref_image = load_image(image_path)
-    output = pipe(prompt=prompt, image=ref_image, num_frames=81, num_inference_steps=30).frames[0]
+    
+    # Generate video
+    output = pipe(
+        prompt=prompt, 
+        image=ref_image, 
+        num_frames=81, 
+        num_inference_steps=30
+    ).frames[0]
+    
     path = os.path.join(OUTPUT_DIR, f"{filename}.mp4")
     export_to_video(output, path, fps=15)
+    
+    # Force deep cleanup
     del pipe
     torch.cuda.empty_cache()
     return path
@@ -42,14 +62,14 @@ def post_process(p1, p2, project_name):
     combined = os.path.join(OUTPUT_DIR, f"{project_name}_combined.mp4")
     concatenate_videoclips([VideoFileClip(p1), VideoFileClip(p2)]).write_videofile(combined, codec='libx264', fps=15)
     
-    # Cleanup temp dirs
+    # Setup temp dirs
     for d in [TEMP_FRAMES, TEMP_UPSCALED]:
         if os.path.exists(d): shutil.rmtree(d)
         os.makedirs(d)
 
     print("GPU Upscaling frames...")
     subprocess.run(["ffmpeg", "-i", combined, "-qscale:v", "2", f"{TEMP_FRAMES}/f_%04d.jpg"], check=True)
-    # '-g 0' works on A100!
+    # GPU acceleration for A100
     subprocess.run([f"{BIN_DIR}/realesrgan-ncnn-vulkan", "-i", TEMP_FRAMES, "-o", TEMP_UPSCALED, "-s", "2", "-n", "realesrgan-x4plus", "-m", f"{BIN_DIR}/models", "-g", "0"], check=True)
     
     upscaled_vid = os.path.join(OUTPUT_DIR, f"{project_name}_upscaled.mp4")
@@ -59,14 +79,20 @@ def post_process(p1, p2, project_name):
     print("GPU Smoothing...")
     subprocess.run([f"{BIN_DIR}/rife/rife-ncnn-vulkan", "-i", upscaled_vid, "-o", final, "-m", f"{BIN_DIR}/rife/rife-v4.6", "-g", "0"], check=True)
     
-    shutil.rmtree(TEMP_FRAMES); shutil.rmtree(TEMP_UPSCALED)
+    # Cleanup
+    shutil.rmtree(TEMP_FRAMES)
+    shutil.rmtree(TEMP_UPSCALED)
     return final
 
 if __name__ == "__main__":
-    P1 = "A black t-shirt with a white swan logo inside a black circle. Centered under a spotlight, rotating 360 degrees. Cinematic lighting."
+    P1 = "A high-quality black t-shirt with a white swan logo inside a black circle. Centered under a spotlight, rotating 360 degrees. Realistic fabric texture."
     P2 = "The white swan logo on the chest pops out, enlarges, and floats toward the camera as a 3D object. Glowing white 'COMING SOON' text appears below."
 
+    # Part 1: Rotation
     v1 = generate_segment(P1, REF_IMAGE, "rotation")
+    # Part 2: Reveal
     v2 = generate_segment(P2, REF_IMAGE, "reveal")
+    
+    # Final production
     result = post_process(v1, v2, "swan_teaser")
     print(f"\nSUCCESS! Teaser ready: {result}")
