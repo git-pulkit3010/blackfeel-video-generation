@@ -1,19 +1,28 @@
-import torch
-if not hasattr(torch, 'xpu'):
-    torch.xpu = type('XPU', (), {'empty_cache': lambda: None})
 
 import torch
 import subprocess
 import os
+import types
+
+# --- CRITICAL FIX FOR NVIDIA GPUS ---
+# Mocks the missing Intel XPU backend to prevent Diffusers 0.37+ from crashing
+if not hasattr(torch, 'xpu'):
+    mock_xpu = types.SimpleNamespace()
+    mock_xpu.is_available = lambda: False 
+    mock_xpu.device_count = lambda: 0
+    mock_xpu.empty_cache = lambda: None
+    mock_xpu.current_device = lambda: 0
+    torch.xpu = mock_xpu
+# ------------------------------------
+
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 
 # --- CONFIGURATION ---
-# Wan 2.1 14B model requires ~30GB disk and 48GB VRAM
 MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
 OUTPUT_DIR = "./outputs"
 
-# Updated paths based on your specific 'tree' output
+# BINARY PATHS (Matches your setup exactly)
 REAL_ESRGAN_BIN = "./bin/realesrgan-ncnn-vulkan"
 RIFE_BIN = "./bin/rife/rife-ncnn-vulkan"
 RIFE_MODEL_DIR = "./bin/rife/rife-v4.6"
@@ -23,7 +32,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def generate_base_video(prompt, image_path, filename):
     print(f"--- Step 1: Generating Base Video using {MODEL_ID} ---")
     
-    # Load Model (Optimized for 48GB VRAM cards like A6000/A40)
+    # Load Model (Optimized for 48GB VRAM)
     pipe = WanImageToVideoPipeline.from_pretrained(
         MODEL_ID, 
         torch_dtype=torch.float16
@@ -33,7 +42,7 @@ def generate_base_video(prompt, image_path, filename):
     # Load reference image
     ref_image = load_image(image_path)
 
-    # Generate using native Wan 2.1 settings
+    # Generate
     output = pipe(
         prompt=prompt,
         image=ref_image,
@@ -43,10 +52,9 @@ def generate_base_video(prompt, image_path, filename):
     ).frames[0]
 
     temp_path = os.path.join(OUTPUT_DIR, f"{filename}_base.mp4")
-    # Exporting at 15fps as Wan native is typically 15-16fps
     export_to_video(output, temp_path, fps=15) 
     
-    # Free up VRAM to prevent Out of Memory errors during upscaling
+    # Cleanup VRAM
     del pipe
     torch.cuda.empty_cache()
     
@@ -56,7 +64,6 @@ def upscale_video(input_path, filename):
     print("--- Step 2: Upscaling with Real-ESRGAN (2x + Face Fix) ---")
     output_path = os.path.join(OUTPUT_DIR, f"{filename}_upscaled.mp4")
     
-    # Using standalone NCNN binary to avoid Python dependency conflicts
     cmd = [
         REAL_ESRGAN_BIN,
         "-i", input_path,
@@ -72,7 +79,6 @@ def smooth_video(input_path, filename):
     print("--- Step 3: Smoothing with RIFE (Interpolation) ---")
     output_path = os.path.join(OUTPUT_DIR, f"{filename}_final.mp4")
     
-    # RIFE interpolation creates smoother motion quality
     cmd = [
         RIFE_BIN,
         "-i", input_path,
@@ -85,21 +91,20 @@ def smooth_video(input_path, filename):
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # USER INPUTS
     PROMPT = "A cyberpunk detective smoking a cigarette, neon rain, highly detailed"
-    ATTACHMENT = "my_reference_photo.jpg" # Ensure this file exists in your folder!
+    ATTACHMENT = "my_reference_photo.jpg" 
     PROJECT_NAME = "cyberpunk_scene_01"
 
     if not os.path.exists(ATTACHMENT):
         print(f"ERROR: Reference image '{ATTACHMENT}' not found.")
     else:
-        # 1. Generate Base Video
+        # 1. Generate
         base_vid = generate_base_video(PROMPT, ATTACHMENT, PROJECT_NAME)
         
-        # 2. Upscale (720p -> 1440p)
+        # 2. Upscale
         upscaled_vid = upscale_video(base_vid, PROJECT_NAME)
         
-        # 3. Smooth (Interpolation)
+        # 3. Smooth
         final_vid = smooth_video(upscaled_vid, PROJECT_NAME)
         
         print(f"DONE! Final video saved at: {final_vid}")
