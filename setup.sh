@@ -3,6 +3,7 @@
 
 echo "--- Installing System Utilities ---"
 apt-get update && apt-get install -y unzip wget git ffmpeg
+apt-get install -y libvulkan1 mesa-vulkan-drivers ffmpeg
 
 echo "--- Upgrading to Blackwell-Compatible PyTorch ---"
 # Remove default versions that lack Blackwell kernels
