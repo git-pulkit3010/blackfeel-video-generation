@@ -49,7 +49,8 @@ def finish_teaser():
         "-o", TEMP_UPSCALED, 
         "-s", "2", 
         "-n", "realesrgan-x4plus",
-        "-m", f"{BIN_DIR}/models"
+        "-m", f"{BIN_DIR}/models",
+        "-g", "0"  # <--- ADD THIS FLAG TO FORCE GPU 0
     ], check=True)
     
     # 4. Reassemble Upscaled Video
