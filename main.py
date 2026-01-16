@@ -1,96 +1,102 @@
-# main.py -- compatibility shim + original pipeline code
-# Fixes: AttributeError: module 'torch.utils._pytree' has no attribute 'register_pytree_node'
-# Strategy: create aliases so both register_pytree_node and _register_pytree_node exist.
 
+import torch
+import torch.nn.functional as F
+import subprocess
+import os
+import types
 import importlib
 import sys
-import os
 
-# -------------------------
-# Compatibility shim (must run BEFORE importing transformers / diffusers)
-# -------------------------
+# ==============================================================================
+#  THE COMPATIBILITY LAYER (Patches for PyTorch 2.1 on RunPod)
+# ==============================================================================
+
+# --- PATCH 1: Fix Transformers 4.57+ compatibility ---
 try:
-    # Try to import the internal module directly
-    _torch_pytree = importlib.import_module("torch.utils._pytree")
-except Exception:
-    # Fallback: try to access via torch.utils attribute if torch is already imported
-    import torch as _torch_tmp
-    _torch_pytree = getattr(_torch_tmp.utils, "_pytree", None)
+    import torch.utils._pytree as _pytree
+    _orig_register = getattr(_pytree, "register_pytree_node", 
+                     getattr(_pytree, "_register_pytree_node", None))
+    def safe_register_pytree_node(typ, flatten_func, unflatten_func, serialized_type_name=None):
+        return _orig_register(typ, flatten_func, unflatten_func)
+    if _orig_register:
+        _pytree.register_pytree_node = safe_register_pytree_node
+        _pytree._register_pytree_node = safe_register_pytree_node
+        print(">> Patched torch.utils._pytree.")
+except Exception: pass
 
-if _torch_pytree is not None:
-    # If only the underscored name exists, create the public alias
-    if not hasattr(_torch_pytree, "register_pytree_node") and hasattr(_torch_pytree, "_register_pytree_node"):
-        _torch_pytree.register_pytree_node = _torch_pytree._register_pytree_node
+# --- PATCH 2: Mock missing RMSNorm (Required by Wan 2.1) ---
+if not hasattr(torch.nn, 'RMSNorm'):
+    class RMSNorm(torch.nn.Module):
+        def __init__(self, dim, eps=1e-6, elementwise_affine=True):
+            super().__init__()
+            self.eps = eps
+            self.weight = torch.nn.Parameter(torch.ones(dim)) if elementwise_affine else None
+        def forward(self, x):
+            norm_x = torch.mean(x**2, dim=-1, keepdim=True)
+            x_normed = x * torch.rsqrt(norm_x + self.eps)
+            if self.weight is not None:
+                return x_normed * self.weight
+            return x_normed
+    torch.nn.RMSNorm = RMSNorm
+    print(">> Patched torch.nn.RMSNorm.")
 
-    # If only the public name exists, create the underscored alias (reverse case)
-    if not hasattr(_torch_pytree, "_register_pytree_node") and hasattr(_torch_pytree, "register_pytree_node"):
-        _torch_pytree._register_pytree_node = _torch_pytree.register_pytree_node
+# --- PATCH 3: Mock DeviceMesh (Missing in 2.1) ---
+if not hasattr(torch.distributed, 'device_mesh'):
+    mock_mesh_module = types.SimpleNamespace()
+    mock_mesh_module.DeviceMesh = type('MockDeviceMesh', (), {})
+    torch.distributed.device_mesh = mock_mesh_module
+    print(">> Patched torch.distributed.device_mesh.")
 
-    # Put the patched module back where libraries expect it
-    try:
-        import torch as _torch
-        if not hasattr(_torch.utils, "_pytree"):
-            _torch.utils._pytree = _torch_pytree
-        else:
-            # replace with our patched reference for safety
-            _torch.utils._pytree = _torch_pytree
-    except Exception:
-        # If torch isn't importable here, that's okay — import later will use sys.modules entry
-        sys.modules["torch.utils._pytree"] = _torch_pytree
-else:
-    # If we couldn't locate torch.utils._pytree, keep going — import errors will surface normally
-    pass
-
-# -------------------------
-# Now import libraries (safe to import transformers / diffusers)
-# -------------------------
-import torch
-import subprocess
-import types
-
-# Keep XPU mock you had (useful on systems without XPU)
+# --- PATCH 4: Robust XPU Mock ---
 if not hasattr(torch, 'xpu'):
     class MockXPU:
         @staticmethod
-        def is_available():
-            return False
-        
-        @staticmethod  
-        def device_count():
-            return 0
-        
+        def is_available(): return False
         @staticmethod
-        def empty_cache():
-            pass
-        
+        def device_count(): return 0
         @staticmethod
-        def current_device():
-            return 0
-        
+        def empty_cache(): pass
         @staticmethod
-        def manual_seed(seed):
-            print(f"Warning: torch.xpu.manual_seed({seed}) called on non-XPU system")
-            pass
-        
+        def current_device(): return 0
         @staticmethod
-        def get_rng_state(device='xpu'):
-            return torch.get_rng_state()
-        
+        def manual_seed(seed): pass
         @staticmethod
-        def set_rng_state(new_state, device='xpu'):
-            torch.set_rng_state(new_state)
-    
+        def seed(): return 0
+        @staticmethod
+        def get_rng_state(device='xpu'): return torch.ByteTensor([])
+        @staticmethod
+        def set_rng_state(new_state, device='xpu'): pass
     torch.xpu = MockXPU()
+    print(">> Patched torch.xpu.")
 
-# Now import diffusers and utilities (your pipeline depends on this)
+# --- PATCH 6: Fix scaled_dot_product_attention (Drop 'enable_gqa') ---
+# PyTorch 2.1 does not support 'enable_gqa'. We intercept the call and remove it.
+_orig_sdpa = F.scaled_dot_product_attention
+def safe_sdpa(query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, **kwargs):
+    # Drop unsupported arguments
+    kwargs.pop('enable_gqa', None) 
+    return _orig_sdpa(query, key, value, attn_mask, dropout_p, is_causal, **kwargs)
+F.scaled_dot_product_attention = safe_sdpa
+torch.nn.functional.scaled_dot_product_attention = safe_sdpa
+print(">> Patched scaled_dot_product_attention.")
+
+# ==============================================================================
+#  MAIN PIPELINE CODE
+# ==============================================================================
+import ftfy 
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 
-# --- CONFIGURATION ---
+# --- PATCH 5: Inject missing 'ftfy' into the pipeline module ---
+try:
+    import diffusers.pipelines.wan.pipeline_wan_i2v as wan_module
+    wan_module.ftfy = ftfy
+    print(">> Injected 'ftfy' into Wan pipeline module.")
+except ImportError:
+    pass 
+
 MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
 OUTPUT_DIR = "./outputs"
-
-# BINARY PATHS (Matches your setup exactly)
 REAL_ESRGAN_BIN = "./bin/realesrgan-ncnn-vulkan"
 RIFE_BIN = "./bin/rife/rife-ncnn-vulkan"
 RIFE_MODEL_DIR = "./bin/rife/rife-v4.6"
@@ -100,17 +106,18 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 def generate_base_video(prompt, image_path, filename):
     print(f"--- Step 1: Generating Base Video using {MODEL_ID} ---")
     
-    # Load Model (Optimized for 48GB VRAM)
+    # 1. Load Model
     pipe = WanImageToVideoPipeline.from_pretrained(
         MODEL_ID, 
         torch_dtype=torch.float16
     )
-    pipe.to("cuda")
     
-    # Load reference image
+    # 2. Enable CPU Offloading (Critical for 48GB VRAM)
+    pipe.enable_model_cpu_offload()
+    
     ref_image = load_image(image_path)
 
-    # Generate
+    # 3. Generate
     output = pipe(
         prompt=prompt,
         image=ref_image,
@@ -122,57 +129,33 @@ def generate_base_video(prompt, image_path, filename):
     temp_path = os.path.join(OUTPUT_DIR, f"{filename}_base.mp4")
     export_to_video(output, temp_path, fps=15) 
     
-    # Cleanup VRAM
+    # Clean up
     del pipe
     torch.cuda.empty_cache()
     
     return temp_path
 
 def upscale_video(input_path, filename):
-    print("--- Step 2: Upscaling with Real-ESRGAN (2x + Face Fix) ---")
+    print("--- Step 2: Upscaling ---")
     output_path = os.path.join(OUTPUT_DIR, f"{filename}_upscaled.mp4")
-    
-    cmd = [
-        REAL_ESRGAN_BIN,
-        "-i", input_path,
-        "-o", output_path,
-        "-s", "2", 
-        "--face_enhance" 
-    ]
-    
-    subprocess.run(cmd, check=True)
+    subprocess.run([REAL_ESRGAN_BIN, "-i", input_path, "-o", output_path, "-s", "2", "--face_enhance"], check=True)
     return output_path
 
 def smooth_video(input_path, filename):
-    print("--- Step 3: Smoothing with RIFE (Interpolation) ---")
+    print("--- Step 3: Smoothing ---")
     output_path = os.path.join(OUTPUT_DIR, f"{filename}_final.mp4")
-    
-    cmd = [
-        RIFE_BIN,
-        "-i", input_path,
-        "-o", output_path,
-        "-m", RIFE_MODEL_DIR
-    ]
-    
-    subprocess.run(cmd, check=True)
+    subprocess.run([RIFE_BIN, "-i", input_path, "-o", output_path, "-m", RIFE_MODEL_DIR], check=True)
     return output_path
 
-# --- MAIN EXECUTION ---
 if __name__ == "__main__":
     PROMPT = "A cyberpunk detective smoking a cigarette, neon rain, highly detailed"
     ATTACHMENT = "my_reference_photo.jpg" 
     PROJECT_NAME = "cyberpunk_scene_01"
 
-    if not os.path.exists(ATTACHMENT):
-        print(f"ERROR: Reference image '{ATTACHMENT}' not found.")
-    else:
-        # 1. Generate
+    if os.path.exists(ATTACHMENT):
         base_vid = generate_base_video(PROMPT, ATTACHMENT, PROJECT_NAME)
-        
-        # 2. Upscale
         upscaled_vid = upscale_video(base_vid, PROJECT_NAME)
-        
-        # 3. Smooth
         final_vid = smooth_video(upscaled_vid, PROJECT_NAME)
-        
-        print(f"DONE! Final video saved at: {final_vid}")
+        print(f"DONE! Final video: {final_vid}")
+    else:
+        print(f"ERROR: {ATTACHMENT} not found.")
