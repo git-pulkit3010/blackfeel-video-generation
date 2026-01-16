@@ -10,7 +10,7 @@ MODE = "DRAFT"  # Change to "PRODUCTION" for final high-res render
 
 # --- CONFIGURATION ---
 MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
-REF_IMAGE = "tshirt_final_20260116_154007.png" 
+REF_IMAGE = "tshirt_image.png" 
 OUTPUT_DIR = "./outputs"
 BIN_DIR = "./bin"
 TEMP_FRAMES = "./temp_frames"
