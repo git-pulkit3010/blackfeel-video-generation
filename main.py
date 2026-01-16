@@ -1,9 +1,54 @@
+# main.py -- compatibility shim + original pipeline code
+# Fixes: AttributeError: module 'torch.utils._pytree' has no attribute 'register_pytree_node'
+# Strategy: create aliases so both register_pytree_node and _register_pytree_node exist.
 
+import importlib
+import sys
+import os
+
+# -------------------------
+# Compatibility shim (must run BEFORE importing transformers / diffusers)
+# -------------------------
+try:
+    # Try to import the internal module directly
+    _torch_pytree = importlib.import_module("torch.utils._pytree")
+except Exception:
+    # Fallback: try to access via torch.utils attribute if torch is already imported
+    import torch as _torch_tmp
+    _torch_pytree = getattr(_torch_tmp.utils, "_pytree", None)
+
+if _torch_pytree is not None:
+    # If only the underscored name exists, create the public alias
+    if not hasattr(_torch_pytree, "register_pytree_node") and hasattr(_torch_pytree, "_register_pytree_node"):
+        _torch_pytree.register_pytree_node = _torch_pytree._register_pytree_node
+
+    # If only the public name exists, create the underscored alias (reverse case)
+    if not hasattr(_torch_pytree, "_register_pytree_node") and hasattr(_torch_pytree, "register_pytree_node"):
+        _torch_pytree._register_pytree_node = _torch_pytree.register_pytree_node
+
+    # Put the patched module back where libraries expect it
+    try:
+        import torch as _torch
+        if not hasattr(_torch.utils, "_pytree"):
+            _torch.utils._pytree = _torch_pytree
+        else:
+            # replace with our patched reference for safety
+            _torch.utils._pytree = _torch_pytree
+    except Exception:
+        # If torch isn't importable here, that's okay — import later will use sys.modules entry
+        sys.modules["torch.utils._pytree"] = _torch_pytree
+else:
+    # If we couldn't locate torch.utils._pytree, keep going — import errors will surface normally
+    pass
+
+# -------------------------
+# Now import libraries (safe to import transformers / diffusers)
+# -------------------------
 import torch
 import subprocess
-import os
 import types
 
+# Keep XPU mock you had (useful on systems without XPU)
 if not hasattr(torch, 'xpu'):
     class MockXPU:
         @staticmethod
@@ -37,6 +82,7 @@ if not hasattr(torch, 'xpu'):
     
     torch.xpu = MockXPU()
 
+# Now import diffusers and utilities (your pipeline depends on this)
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 
