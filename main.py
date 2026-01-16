@@ -82,7 +82,7 @@ def smooth_video(input_path, filename):
 if __name__ == "__main__":
     # Ensure your reference image is named correctly here!
     PROMPT = "A cyberpunk detective smoking a cigarette, neon rain, highly detailed"
-    ATTACHMENT = "my_reference_photo.jpg" 
+    ATTACHMENT = "my_reference_photo.png" 
     PROJECT_NAME = "cyberpunk_scene_01"
 
     if not os.path.exists(ATTACHMENT):
