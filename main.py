@@ -4,16 +4,38 @@ import subprocess
 import os
 import types
 
-# --- CRITICAL FIX FOR NVIDIA GPUS ---
-# Mocks the missing Intel XPU backend to prevent Diffusers 0.37+ from crashing
 if not hasattr(torch, 'xpu'):
-    mock_xpu = types.SimpleNamespace()
-    mock_xpu.is_available = lambda: False 
-    mock_xpu.device_count = lambda: 0
-    mock_xpu.empty_cache = lambda: None
-    mock_xpu.current_device = lambda: 0
-    torch.xpu = mock_xpu
-# ------------------------------------
+    class MockXPU:
+        @staticmethod
+        def is_available():
+            return False
+        
+        @staticmethod  
+        def device_count():
+            return 0
+        
+        @staticmethod
+        def empty_cache():
+            pass
+        
+        @staticmethod
+        def current_device():
+            return 0
+        
+        @staticmethod
+        def manual_seed(seed):
+            print(f"Warning: torch.xpu.manual_seed({seed}) called on non-XPU system")
+            pass
+        
+        @staticmethod
+        def get_rng_state(device='xpu'):
+            return torch.get_rng_state()
+        
+        @staticmethod
+        def set_rng_state(new_state, device='xpu'):
+            torch.set_rng_state(new_state)
+    
+    torch.xpu = MockXPU()
 
 from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
