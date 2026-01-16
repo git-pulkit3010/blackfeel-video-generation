@@ -5,30 +5,31 @@ from diffusers import WanImageToVideoPipeline
 from diffusers.utils import export_to_video, load_image
 
 # --- CONFIGURATION ---
+# Wan 2.1 14B model requires ~30GB disk and 48GB VRAM
 MODEL_ID = "Wan-AI/Wan2.1-I2V-14B-720P-Diffusers"
 OUTPUT_DIR = "./outputs"
 
-# Exact paths based on your extraction logs
+# Updated paths based on your specific 'tree' output
 REAL_ESRGAN_BIN = "./bin/realesrgan-ncnn-vulkan"
-RIFE_BIN = "./bin/rife-ncnn-vulkan-20221029-ubuntu/rife-ncnn-vulkan"
-RIFE_MODEL_DIR = "./bin/rife-ncnn-vulkan-20221029-ubuntu/rife-v4.6"
+RIFE_BIN = "./bin/rife/rife-ncnn-vulkan"
+RIFE_MODEL_DIR = "./bin/rife/rife-v4.6"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def generate_base_video(prompt, image_path, filename):
     print(f"--- Step 1: Generating Base Video using {MODEL_ID} ---")
     
-    # Load Model (Optimized for 48GB VRAM)
+    # Load Model (Optimized for 48GB VRAM cards like A6000/A40)
     pipe = WanImageToVideoPipeline.from_pretrained(
         MODEL_ID, 
         torch_dtype=torch.float16
     )
     pipe.to("cuda")
     
-    # Load User Attachment
+    # Load reference image
     ref_image = load_image(image_path)
 
-    # Generate
+    # Generate using native Wan 2.1 settings
     output = pipe(
         prompt=prompt,
         image=ref_image,
@@ -38,9 +39,10 @@ def generate_base_video(prompt, image_path, filename):
     ).frames[0]
 
     temp_path = os.path.join(OUTPUT_DIR, f"{filename}_base.mp4")
+    # Exporting at 15fps as Wan native is typically 15-16fps
     export_to_video(output, temp_path, fps=15) 
     
-    # Free up VRAM for the next steps (Crucial!)
+    # Free up VRAM to prevent Out of Memory errors during upscaling
     del pipe
     torch.cuda.empty_cache()
     
@@ -50,8 +52,7 @@ def upscale_video(input_path, filename):
     print("--- Step 2: Upscaling with Real-ESRGAN (2x + Face Fix) ---")
     output_path = os.path.join(OUTPUT_DIR, f"{filename}_upscaled.mp4")
     
-    # -s 2: Scale 2x (720p -> 1440p)
-    # --face_enhance: Fixes faces
+    # Using standalone NCNN binary to avoid Python dependency conflicts
     cmd = [
         REAL_ESRGAN_BIN,
         "-i", input_path,
@@ -67,7 +68,7 @@ def smooth_video(input_path, filename):
     print("--- Step 3: Smoothing with RIFE (Interpolation) ---")
     output_path = os.path.join(OUTPUT_DIR, f"{filename}_final.mp4")
     
-    # rife-ncnn-vulkan usage: -i input.mp4 -o output.mp4 -m model_dir
+    # RIFE interpolation creates smoother motion quality
     cmd = [
         RIFE_BIN,
         "-i", input_path,
@@ -80,21 +81,21 @@ def smooth_video(input_path, filename):
 
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # Ensure your reference image is named correctly here!
+    # USER INPUTS
     PROMPT = "A cyberpunk detective smoking a cigarette, neon rain, highly detailed"
-    ATTACHMENT = "my_reference_photo.png" 
+    ATTACHMENT = "my_reference_photo.jpg" # Ensure this file exists in your folder!
     PROJECT_NAME = "cyberpunk_scene_01"
 
     if not os.path.exists(ATTACHMENT):
-        print(f"ERROR: Reference image '{ATTACHMENT}' not found in the directory.")
+        print(f"ERROR: Reference image '{ATTACHMENT}' not found.")
     else:
-        # 1. Generate
+        # 1. Generate Base Video
         base_vid = generate_base_video(PROMPT, ATTACHMENT, PROJECT_NAME)
         
-        # 2. Upscale
+        # 2. Upscale (720p -> 1440p)
         upscaled_vid = upscale_video(base_vid, PROJECT_NAME)
         
-        # 3. Smooth
+        # 3. Smooth (Interpolation)
         final_vid = smooth_video(upscaled_vid, PROJECT_NAME)
         
         print(f"DONE! Final video saved at: {final_vid}")
